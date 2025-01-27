@@ -96,7 +96,7 @@ jobs:
           repo-root: ${{ env.REPO_ROOT }}
 
       - name: Setup build environment
-        uses: ameryhung/ci/setup-build-env
+        uses: ameryhung/ci/setup-build-env@dev
         with:
           arch: ${{ inputs.arch }}
           llvm-version: ${{ inputs.llvm-version }}
@@ -118,7 +118,7 @@ jobs:
           install-dir: ${{ env.BPF_GCC_INSTALL_DIR }}
 
       - name: Build selftests/bpf
-        uses: ameryhung/ci/build-selftests
+        uses: ameryhung/ci/build-selftests@dev
         env:
           MAX_MAKE_JOBS: 32
           RELEASE: ${{ inputs.release && '1' || '' }}
