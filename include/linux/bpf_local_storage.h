@@ -83,6 +83,8 @@ struct bpf_local_storage_elem {
 						 * bpf_selem_free
 						 * after raw_spin_unlock
 						 */
+		/* Used by map_free() and destroy() when rqspinlock returns err */
+		atomic_t link_cnt;
 	};
 	/* 8 bytes hole */
 	/* The data is stored in another cacheline to minimize
