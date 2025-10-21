@@ -109,6 +109,7 @@ bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
 			if (swap_uptrs)
 				bpf_obj_swap_uptrs(smap->map.record, SDATA(selem)->data, value);
 		}
+		atomic_set(&selem->state, SELEM_LINKED);
 		return selem;
 	}
 
@@ -218,9 +219,10 @@ static void bpf_selem_free_rcu(struct rcu_head *rcu)
 	/* The bpf_local_storage_map_free will wait for rcu_barrier */
 	smap = rcu_dereference_check(SDATA(selem)->smap, 1);
 
-	migrate_disable();
-	bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
-	migrate_enable();
+	// FIXME: only skip when bpf_selem_unlink_lockless has freed it
+	//migrate_disable();
+	//bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
+	//migrate_enable();
 	bpf_mem_cache_raw_free(selem);
 }
 
@@ -242,7 +244,8 @@ void bpf_selem_free(struct bpf_local_storage_elem *selem,
 		 * for task storage, so this bpf_obj_free_fields() won't unpin
 		 * any uptr.
 		 */
-		bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
+		// FIXME: only skip when bpf_selem_unlink_lockless has freed it
+		//bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
 		__bpf_selem_free(selem, reuse_now);
 		return;
 	}
@@ -254,7 +257,8 @@ void bpf_selem_free(struct bpf_local_storage_elem *selem,
 		 * no bpf prog can have a hold on the selem. It is
 		 * safe to unpin the uptrs and free the selem now.
 		 */
-		bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
+		// FIXME: only skip when bpf_selem_unlink_lockless has freed it
+		//bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
 		/* Instead of using the vanilla call_rcu(),
 		 * bpf_mem_cache_free will be able to reuse selem
 		 * immediately.
@@ -489,6 +493,133 @@ out:
 		bpf_local_storage_free(local_storage, storage_smap, bpf_ma, reuse_now);
 
 	return err;
+}
+
+/*
+ * Unlink an selem from map and local storage with lockless fallback if rqspinlock
+ * returns error. It should only be called by bpf_local_storage_destroy() or
+ * bpf_local_storage_map_free().
+ *
+ * An selem will go through the following state
+ *
+ * SELEM_LINKED
+ *  |
+ *  | Callers cmpxchg into the next state and the one that succeeds will
+ *  | unhcarge memory, free special fields, invalidate cache
+ *  v
+ * SELEM_PENDING_FREE | SELEM_LINKED
+ *  |
+ *  | Try to unlink with lock and then fall back to lockless if the selem
+ *  | is still linked to map->list and local_storage->list
+ *  v
+ * SELEM_PENDING_FREE | {SELEM_LINKED_TO_MAP, SELEM_LINKED_TO_STORAGE, SELEM_UNLINKED}
+ *  |
+ *  | Determine who should free the selem and add it to a local to_free list.
+ *  | map_free() cannot free an selem with SELEM_LINKED_TO_STORAGE and
+ *  | destory() cannot free an selem with SELEM_LINKED_TO_MAP. Use cmpxchg
+ *  | since an selem can be unlinked to both list while seen by both
+ *  | callers.
+ *  v
+ * SELEM_PENDING_FREE | SELEM_LINKED_TO_TOFREE
+ *
+ *
+ * TODO: maybe make normal bpf_selem_unlink also use this function to simplify code
+ */
+static bool bpf_selem_unlink_lockless(struct bpf_local_storage_elem *selem,
+				      u32 owner_state, struct hlist_head *to_free)
+{
+	struct bpf_local_storage *local_storage;
+	struct bpf_local_storage_map_bucket *b;
+	struct bpf_local_storage_map *smap;
+	bool free_local_storage = false;
+	unsigned long flags;
+	int state, err;
+	void *owner;
+
+	/*
+	 * smap or local_storage may already be free. Always check SELEM_LINKED_TO_{MAP,
+	 * STORAGE} before dereferencing the corresponding pointer.
+	 */
+	local_storage = rcu_dereference_check(selem->local_storage, bpf_rcu_lock_held());
+	smap = rcu_dereference_check(SDATA(selem)->smap, bpf_rcu_lock_held());
+
+	/*
+	 * SELEM_LINKED -> SELEM_P_LINKED
+	 *
+	 * This is the only place when smap and local_storage are both valid. The first
+	 * caller unlinking the selem will uncharge memory, cleanup special fields and cache.
+	 */
+	state = atomic_cmpxchg(&selem->state, SELEM_LINKED, SELEM_P_LINKED);
+	if (state == SELEM_LINKED) {
+		mem_uncharge(NULL, smap, local_storage->owner, smap->elem_size);
+		bpf_obj_free_fields(smap->map.record, SDATA(selem)->data);
+		if (rcu_access_pointer(local_storage->cache[smap->cache_idx]) == SDATA(selem))
+			RCU_INIT_POINTER(local_storage->cache[smap->cache_idx], NULL);
+	}
+
+	/* Try grabbing locks and unlinking selem to minimize number of stale elements */
+	if (state & SELEM_LINKED_TO_MAP) {
+		/* local_storage is only used for hashing */
+		// TODO: maybe change back to hashing selem so that we can properly clear
+		// selem->local_storage later
+		b = select_bucket(smap, local_storage);
+		err = raw_res_spin_lock_irqsave(&b->lock, flags);
+		if (!err) {
+			bpf_selem_unlink_map_nolock(selem);
+			//RCU_INIT_POINTER(SDATA(selem)->smap, NULL);
+			atomic_andnot(SELEM_LINKED_TO_MAP, &selem->state);
+			raw_res_spin_unlock_irqrestore(&b->lock, flags);
+		}
+	}
+
+	if (state & SELEM_LINKED_TO_STORAGE) {
+		err = raw_res_spin_lock_irqsave(&local_storage->lock, flags);
+		if (!err) {
+			owner = local_storage->owner;
+			if (selem_linked_to_storage(selem)) {
+				free_local_storage = hlist_is_singular_node(&selem->snode,
+									    &local_storage->list);
+				if (free_local_storage) {
+					mem_uncharge(local_storage, NULL, owner,
+						     sizeof(struct bpf_local_storage));
+					local_storage->owner = NULL;
+					/* After this RCU_INIT, owner may be freed and cannot be used */
+					RCU_INIT_POINTER(*owner_storage(local_storage, NULL, owner), NULL);
+				}
+				hlist_del_init_rcu(&selem->snode);
+			}
+
+			//RCU_INIT_POINTER(selem->local_storage, NULL);
+			atomic_andnot(SELEM_LINKED_TO_STORAGE, &selem->state);
+			raw_res_spin_unlock_irqrestore(&local_storage->lock, flags);
+		}
+	}
+
+	/*
+	 * SELEM_P_LINKED
+	 * -> {SELEM_P_LINKED_TO_MAP, SELEM_P_LINKED_TO_STORAGE, SELEM_P_UNLINKED}
+	 *
+	 * If the selem are still linked to both, use cmpxchg to "donate" the
+	 * selem to the opposing side. We cannot claim it since we don't know
+	 * if the other side is still using it, but we know we are going away.
+	 */
+	state = owner_state == SELEM_LINKED_TO_STORAGE ? SELEM_P_LINKED_TO_MAP :
+							 SELEM_P_LINKED_TO_STORAGE;
+	atomic_cmpxchg(&selem->state, SELEM_P_LINKED, state);
+
+	/*
+	 * {SELEM_P_LINKED_TO_MAP, SELEM_P_LINKED_TO_STORAGE, SELEM_P_UNLINKED}
+	 * -> SELEM_P_LINKED_TO_TOFREE
+	 *
+	 * If state == (SELEM_PENDING_FREE | owner_state), we're responsible for freeing the selem
+	 * If state == SELEM_P_UNLINKED, either one of the racing callers can free it
+	 */
+	state = atomic_read(&selem->state);
+	if ((state == (SELEM_PENDING_FREE | owner_state) || state == SELEM_P_UNLINKED) &&
+	     atomic_try_cmpxchg(&selem->state, &state, SELEM_P_LINKED_TO_TOFREE))
+		hlist_add_head(&selem->free_node, to_free);
+
+	return free_local_storage;
 }
 
 void __bpf_local_storage_insert_cache(struct bpf_local_storage *local_storage,

@@ -73,6 +73,20 @@ struct bpf_local_storage_data {
 	u8 data[] __aligned(8);
 };
 
+enum bpf_selem_state {
+	SELEM_UNLINKED = 0,
+	SELEM_LINKED_TO_MAP = (1 << 0),
+	SELEM_LINKED_TO_STORAGE = (1 << 1),
+	SELEM_LINKED_TO_TOFREE = (1 << 2),
+	SELEM_LINKED = SELEM_LINKED_TO_MAP | SELEM_LINKED_TO_STORAGE,
+	SELEM_PENDING_FREE = (1 << 3),
+	SELEM_P_UNLINKED = SELEM_PENDING_FREE | SELEM_UNLINKED,
+	SELEM_P_LINKED_TO_MAP = SELEM_PENDING_FREE | SELEM_LINKED_TO_MAP,
+	SELEM_P_LINKED_TO_STORAGE = SELEM_PENDING_FREE | SELEM_LINKED_TO_STORAGE,
+	SELEM_P_LINKED_TO_TOFREE = SELEM_PENDING_FREE | SELEM_LINKED_TO_TOFREE,
+	SELEM_P_LINKED = SELEM_PENDING_FREE | SELEM_LINKED,
+};
+
 /* Linked to bpf_local_storage and bpf_local_storage_map */
 struct bpf_local_storage_elem {
 	struct hlist_node map_node;	/* Linked to bpf_local_storage_map */
@@ -85,7 +99,8 @@ struct bpf_local_storage_elem {
 						 * after raw_spin_unlock
 						 */
 	};
-	/* 8 bytes hole */
+	atomic_t state;
+	/* 4 bytes hole */
 	/* The data is stored in another cacheline to minimize
 	 * the number of cachelines access during a cache hit.
 	 */
