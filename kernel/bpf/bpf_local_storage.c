@@ -24,31 +24,37 @@ select_bucket(struct bpf_local_storage_map *smap,
 	return &smap->buckets[hash_ptr(local_storage, smap->bucket_log)];
 }
 
-static int mem_charge(struct bpf_local_storage_map *smap, void *owner, u32 size)
+static int mem_charge(struct bpf_local_storage *local_storage,
+		      struct bpf_local_storage_map *smap, void *owner, u32 size)
 {
-	struct bpf_map *map = &smap->map;
+	const struct bpf_map_ops *map_ops = smap ? smap->map.ops :
+						   local_storage->map_ops;
 
-	if (!map->ops->map_local_storage_charge)
+	if (!map_ops->map_local_storage_charge)
 		return 0;
 
-	return map->ops->map_local_storage_charge(smap, owner, size);
+	return map_ops->map_local_storage_charge(smap, owner, size);
 }
 
-static void mem_uncharge(struct bpf_local_storage_map *smap, void *owner,
+static void mem_uncharge(struct bpf_local_storage *local_storage,
+			 struct bpf_local_storage_map *smap, void *owner,
 			 u32 size)
 {
-	struct bpf_map *map = &smap->map;
+	const struct bpf_map_ops *map_ops = smap ? smap->map.ops :
+						   local_storage->map_ops;
 
-	if (map->ops->map_local_storage_uncharge)
-		map->ops->map_local_storage_uncharge(smap, owner, size);
+	if (map_ops->map_local_storage_uncharge)
+		map_ops->map_local_storage_uncharge(smap, owner, size);
 }
 
 static struct bpf_local_storage __rcu **
-owner_storage(struct bpf_local_storage_map *smap, void *owner)
+owner_storage(struct bpf_local_storage *local_storage,
+	      struct bpf_local_storage_map *smap, void *owner)
 {
-	struct bpf_map *map = &smap->map;
+	const struct bpf_map_ops *map_ops = smap ? smap->map.ops :
+						   local_storage->map_ops;
 
-	return map->ops->map_owner_storage_ptr(owner);
+	return map_ops->map_owner_storage_ptr(owner);
 }
 
 static bool selem_linked_to_storage_lockless(const struct bpf_local_storage_elem *selem)
@@ -77,7 +83,7 @@ bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
 {
 	struct bpf_local_storage_elem *selem;
 
-	if (mem_charge(smap, owner, smap->elem_size))
+	if (mem_charge(NULL, smap, owner, smap->elem_size))
 		return NULL;
 
 	if (smap->bpf_ma) {
@@ -106,7 +112,7 @@ bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
 		return selem;
 	}
 
-	mem_uncharge(smap, owner, smap->elem_size);
+	mem_uncharge(NULL, smap, owner, smap->elem_size);
 
 	return NULL;
 }
@@ -296,16 +302,16 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 	 * The owner may be freed once the last selem is unlinked
 	 * from local_storage.
 	 */
-	mem_uncharge(smap, owner, smap->elem_size);
+	mem_uncharge(NULL, smap, owner, smap->elem_size);
 
 	free_local_storage = hlist_is_singular_node(&selem->snode,
 						    &local_storage->list);
 	if (free_local_storage) {
-		mem_uncharge(smap, owner, sizeof(struct bpf_local_storage));
+		mem_uncharge(NULL, smap, owner, sizeof(struct bpf_local_storage));
 		local_storage->owner = NULL;
 
 		/* After this RCU_INIT, owner may be freed and cannot be used */
-		RCU_INIT_POINTER(*owner_storage(smap, owner), NULL);
+		RCU_INIT_POINTER(*owner_storage(NULL, smap, owner), NULL);
 
 		/* local_storage is not freed now.  local_storage->lock is
 		 * still held and raw_spin_unlock_bh(&local_storage->lock)
@@ -531,7 +537,7 @@ int bpf_local_storage_alloc(void *owner,
 	unsigned long flags;
 	int err;
 
-	err = mem_charge(smap, owner, sizeof(*storage));
+	err = mem_charge(NULL, smap, owner, sizeof(*storage));
 	if (err)
 		return err;
 
@@ -549,6 +555,7 @@ int bpf_local_storage_alloc(void *owner,
 	INIT_HLIST_HEAD(&storage->list);
 	raw_res_spin_lock_init(&storage->lock);
 	storage->owner = owner;
+	storage->map_ops = smap->map.ops;
 
 	bpf_selem_link_storage_nolock(storage, first_selem);
 
@@ -560,7 +567,7 @@ int bpf_local_storage_alloc(void *owner,
 	bpf_selem_link_map_nolock(smap, first_selem, b);
 
 	owner_storage_ptr =
-		(struct bpf_local_storage **)owner_storage(smap, owner);
+		(struct bpf_local_storage **)owner_storage(NULL, smap, owner);
 	/* Publish storage to the owner.
 	 * Instead of using any lock of the kernel object (i.e. owner),
 	 * cmpxchg will work with any kernel object regardless what
@@ -594,7 +601,7 @@ int bpf_local_storage_alloc(void *owner,
 
 uncharge:
 	bpf_local_storage_free(storage, smap, smap->bpf_ma, true);
-	mem_uncharge(smap, owner, sizeof(*storage));
+	mem_uncharge(NULL, smap, owner, sizeof(*storage));
 	return err;
 }
 
@@ -625,7 +632,7 @@ bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 	if (gfp_flags == GFP_KERNEL && (map_flags & ~BPF_F_LOCK) != BPF_NOEXIST)
 		return ERR_PTR(-EINVAL);
 
-	local_storage = rcu_dereference_check(*owner_storage(smap, owner),
+	local_storage = rcu_dereference_check(*owner_storage(NULL, smap, owner),
 					      bpf_rcu_lock_held());
 	if (!local_storage || hlist_empty(&local_storage->list)) {
 		/* Very first elem for the owner */
@@ -640,7 +647,7 @@ bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 		err = bpf_local_storage_alloc(owner, smap, selem, gfp_flags);
 		if (err) {
 			bpf_selem_free(selem, smap, true);
-			mem_uncharge(smap, owner, smap->elem_size);
+			mem_uncharge(NULL, smap, owner, smap->elem_size);
 			return ERR_PTR(err);
 		}
 
@@ -723,7 +730,7 @@ unlock:
 	raw_res_spin_unlock_irqrestore(&local_storage->lock, flags);
 	bpf_selem_free_list(&old_selem_free_list, false);
 	if (alloc_selem) {
-		mem_uncharge(smap, owner, smap->elem_size);
+		mem_uncharge(NULL, smap, owner, smap->elem_size);
 		bpf_selem_free(alloc_selem, smap, true);
 	}
 	return err ? ERR_PTR(err) : SDATA(selem);
