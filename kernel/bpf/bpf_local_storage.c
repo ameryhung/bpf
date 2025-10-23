@@ -396,7 +396,11 @@ static void bpf_selem_link_map_nolock(struct bpf_local_storage_map *smap,
 	hlist_add_head_rcu(&selem->map_node, &b->list);
 }
 
-int bpf_selem_unlink(struct bpf_local_storage_elem *selem, bool reuse_now)
+/*
+ * Unlink an selem from map and local storage with lock held.
+ * This is the common path used by local storages to delete an selem.
+ */
+int bpf_selem_unlink(struct bpf_local_storage_elem *selem)
 {
 	struct bpf_local_storage *local_storage;
 	struct bpf_local_storage_map *smap;
@@ -432,10 +436,10 @@ int bpf_selem_unlink(struct bpf_local_storage_elem *selem, bool reuse_now)
 out:
 	raw_res_spin_unlock_irqrestore(&local_storage->lock, flags);
 
-	bpf_selem_free_list(&selem_free_list, reuse_now);
+	bpf_selem_free_list(&selem_free_list, false);
 
 	if (free_local_storage)
-		bpf_local_storage_free(local_storage, reuse_now);
+		bpf_local_storage_free(local_storage, false);
 
 	return err;
 }
@@ -812,10 +816,17 @@ int bpf_local_storage_map_check_btf(const struct bpf_map *map,
 	return 0;
 }
 
-void bpf_local_storage_destroy(struct bpf_local_storage *local_storage)
+/*
+ * Destroy local storage when the owner is going away. Caller must clear owner->storage
+ * and uncharge memory if memory charging is used.
+ *
+ * Since smaps associated with selems may already be gone, mem_uncharge() or
+ * owner_storage() cannot be called in this function. Let the owner (i.e., the caller)
+ * do it instead.
+ */
+u32 bpf_local_storage_destroy(struct bpf_local_storage *local_storage)
 {
 	struct bpf_local_storage_elem *selem;
-	bool free_storage = false;
 	HLIST_HEAD(free_selem_list);
 	struct hlist_node *n;
 	unsigned long flags;
@@ -829,33 +840,23 @@ void bpf_local_storage_destroy(struct bpf_local_storage *local_storage)
 	 * when unlinking elem from the local_storage->list and
 	 * the map's bucket->list.
 	 */
-	raw_res_spin_lock_irqsave(&local_storage->lock, flags);
-	hlist_for_each_entry_safe(selem, n, &local_storage->list, snode) {
-		/* Always unlink from map before unlinking from
-		 * local_storage.
-		 */
-		bpf_selem_unlink_map(selem);
-		/* If local_storage list has only one element, the
-		 * bpf_selem_unlink_storage_nolock() will return true.
-		 * Otherwise, it will return false. The current loop iteration
-		 * intends to remove all local storage. So the last iteration
-		 * of the loop will set the free_cgroup_storage to true.
-		 */
-		free_storage = bpf_selem_unlink_storage_nolock(
-			local_storage, selem, &free_selem_list);
-	}
-	raw_res_spin_unlock_irqrestore(&local_storage->lock, flags);
+	hlist_for_each_entry_safe(selem, n, &local_storage->list, snode)
+		bpf_selem_unlink_nofail(selem, NULL, &free_selem_list);
 
-	bpf_selem_free_list(&free_selem_list, true);
+	/*
+	 * Need to wait an RCU gp before freeing selem and local_storage
+	 * since bpf_local_storage_map_free() may still be referencing them.
+	 */
+	bpf_selem_free_list(&free_selem_list, false);
 
-	if (free_storage)
-		bpf_local_storage_free(local_storage, true);
+	bpf_local_storage_free(local_storage, false);
 
 	if (WARN_ON(raw_res_spin_lock_irqsave(&local_storage->lock, flags)))
-		return;
+		return sizeof(*local_storage) + local_storage->selems_size;
 
 	local_storage->owner = NULL;
 	raw_res_spin_unlock_irqrestore(&local_storage->lock, flags);
+	return sizeof(*local_storage) + local_storage->selems_size;
 }
 
 u64 bpf_local_storage_map_mem_usage(const struct bpf_map *map)
@@ -921,9 +922,10 @@ free_smap:
 void bpf_local_storage_map_free(struct bpf_map *map,
 				struct bpf_local_storage_cache *cache)
 {
+	struct bpf_local_storage_elem *selem, *prev = NULL;
 	struct bpf_local_storage_map_bucket *b;
-	struct bpf_local_storage_elem *selem;
 	struct bpf_local_storage_map *smap;
+	HLIST_HEAD(free_selem_list);
 	unsigned int i;
 
 	smap = (struct bpf_local_storage_map *)map;
@@ -952,7 +954,17 @@ void bpf_local_storage_map_free(struct bpf_map *map,
 		while ((selem = hlist_entry_safe(
 				rcu_dereference_raw(hlist_first_rcu(&b->list)),
 				struct bpf_local_storage_elem, map_node))) {
-			bpf_selem_unlink(selem, true);
+			/*
+			 * bpf_local_storage_map_free() should only call
+			 * bpf_selem_unlink_nofail() on an unique selem once.
+			 */
+			if (prev == selem)
+				continue;
+
+			prev = selem;
+			bpf_selem_unlink_nofail(selem, b, &free_selem_list);
+			bpf_selem_free_list(&free_selem_list, false);
+
 			cond_resched_rcu();
 		}
 		rcu_read_unlock();
