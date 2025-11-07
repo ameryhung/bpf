@@ -72,7 +72,11 @@ struct bpf_local_storage_data {
 struct bpf_local_storage_elem {
 	struct hlist_node map_node;	/* Linked to bpf_local_storage_map */
 	struct hlist_node snode;	/* Linked to bpf_local_storage */
-	struct bpf_local_storage __rcu *local_storage;
+	union {
+		struct bpf_local_storage __rcu *local_storage;
+		/* Used to decide how to free selem in bpf_selem_free */
+		bool use_kmalloc_nolock;
+	};
 	union {
 		struct rcu_head rcu;
 		struct hlist_node free_node;	/* used to postpone
@@ -96,6 +100,7 @@ struct bpf_local_storage {
 				 */
 	struct rcu_head rcu;
 	rqspinlock_t lock;	/* Protect adding/removing from the "list" */
+	u64 selems_size;	/* Total selem size. Protected by "lock" */
 	bool use_kmalloc_nolock;
 };
 

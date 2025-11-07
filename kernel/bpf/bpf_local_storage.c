@@ -219,7 +219,7 @@ void bpf_selem_free(struct bpf_local_storage_elem *selem,
 
 	smap = rcu_dereference_check(SDATA(selem)->smap, bpf_rcu_lock_held());
 
-	if (!smap->use_kmalloc_nolock) {
+	if (!selem->use_kmalloc_nolock) {
 		/*
 		 * No uptr will be unpin even when reuse_now == false since uptr
 		 * is only supported in task local storage, where
@@ -306,9 +306,13 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 		RCU_INIT_POINTER(local_storage->cache[smap->cache_idx], NULL);
 
 	hlist_add_head(&selem->free_node, free_selem_list);
+	RCU_INIT_POINTER(selem->local_storage, NULL);
+	selem->use_kmalloc_nolock = smap->use_kmalloc_nolock;
 
 	if (rcu_access_pointer(local_storage->smap) == smap)
 		RCU_INIT_POINTER(local_storage->smap, NULL);
+
+	local_storage->selems_size -= smap->elem_size;
 
 	return free_local_storage;
 }
@@ -316,6 +320,11 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 void bpf_selem_link_storage_nolock(struct bpf_local_storage *local_storage,
 				   struct bpf_local_storage_elem *selem)
 {
+	struct bpf_local_storage_map *smap;
+
+	smap = rcu_dereference_check(SDATA(selem)->smap, bpf_rcu_lock_held());
+	local_storage->selems_size += smap->elem_size;
+
 	RCU_INIT_POINTER(selem->local_storage, local_storage);
 	hlist_add_head_rcu(&selem->snode, &local_storage->list);
 }
@@ -386,6 +395,7 @@ static void bpf_selem_link_map_nolock(struct bpf_local_storage_map *smap,
 int bpf_selem_unlink(struct bpf_local_storage_elem *selem, bool reuse_now)
 {
 	struct bpf_local_storage *local_storage;
+	struct bpf_local_storage_map *smap;
 	bool free_local_storage = false;
 	HLIST_HEAD(selem_free_list);
 	unsigned long flags;
@@ -397,6 +407,7 @@ int bpf_selem_unlink(struct bpf_local_storage_elem *selem, bool reuse_now)
 
 	local_storage = rcu_dereference_check(selem->local_storage,
 					      bpf_rcu_lock_held());
+	smap = rcu_dereference_check(SDATA(selem)->smap, bpf_rcu_lock_held());
 
 	err = raw_res_spin_lock_irqsave(&local_storage->lock, flags);
 	if (err)
