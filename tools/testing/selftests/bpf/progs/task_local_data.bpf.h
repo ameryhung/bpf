@@ -82,12 +82,13 @@ struct tld_metadata {
 struct tld_meta_u {
 	__u16 cnt;
 	__u16 size;
-	struct tld_metadata metadata[TLD_MAX_DATA_CNT];
+	__u32 unused;
+	struct tld_metadata metadata[TLD_MAX_DATA_CNT] __attribute__((aligned(64)));
 };
 
 struct tld_data_u {
 	__u64 start; /* offset of tld_data_u->data in a page */
-	char data[__PAGE_SIZE - sizeof(__u64)];
+	char data[__PAGE_SIZE - sizeof(__u64)] __attribute__((aligned(8)));
 };
 
 struct tld_map_value {
