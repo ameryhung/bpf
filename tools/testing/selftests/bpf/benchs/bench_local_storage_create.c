@@ -30,7 +30,7 @@ static const struct argp_option opts[] = {
 	{ "batch-size", ARG_BATCH_SZ, "BATCH_SIZE", 0,
 	  "The number of storage creations in each batch" },
 	{ "storage-type", ARG_STORAGE_TYPE, "STORAGE_TYPE", 0,
-	  "The type of local storage to test (socket or task)" },
+	  "The type of local storage to test (socket, task, or hashmap)" },
 	{},
 };
 
@@ -52,8 +52,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			storage_type = BPF_MAP_TYPE_TASK_STORAGE;
 		} else if (!strcmp(arg, "socket")) {
 			storage_type = BPF_MAP_TYPE_SK_STORAGE;
+		} else if (!strcmp(arg, "hashmap")) {
+			storage_type = BPF_MAP_TYPE_HASH;
 		} else {
-			fprintf(stderr, "invalid storage-type (socket or task)\n");
+			fprintf(stderr, "invalid storage-type (socket, task, or hashmap)\n");
 			argp_usage(state);
 		}
 		break;
@@ -82,14 +84,33 @@ static void setup(void)
 {
 	int i;
 
-	skel = bench_local_storage_create__open_and_load();
+	skel = bench_local_storage_create__open();
 	if (!skel) {
+		fprintf(stderr, "error opening skel\n");
+		exit(1);
+	}
+
+	if (storage_type != BPF_MAP_TYPE_HASH)
+		bpf_program__set_autoload(skel->progs.hashmap_socket_destroy, false);
+
+	if (bench_local_storage_create__load(skel)) {
 		fprintf(stderr, "error loading skel\n");
 		exit(1);
 	}
 
 	skel->bss->bench_pid = getpid();
-	if (storage_type == BPF_MAP_TYPE_SK_STORAGE) {
+
+	if (storage_type == BPF_MAP_TYPE_HASH) {
+		skel->bss->use_hashmap = 1;
+		if (!bpf_program__attach(skel->progs.socket_post_create)) {
+			fprintf(stderr, "Error attaching socket_post_create\n");
+			exit(1);
+		}
+		if (!bpf_program__attach(skel->progs.hashmap_socket_destroy)) {
+			fprintf(stderr, "Error attaching hashmap_socket_destroy\n");
+			exit(1);
+		}
+	} else if (storage_type == BPF_MAP_TYPE_SK_STORAGE) {
 		if (!bpf_program__attach(skel->progs.socket_post_create)) {
 			fprintf(stderr, "Error attaching bpf program\n");
 			exit(1);
@@ -111,13 +132,7 @@ static void setup(void)
 	for (i = 0; i < env.producer_cnt; i++) {
 		struct thread *t = &threads[i];
 
-		if (storage_type == BPF_MAP_TYPE_SK_STORAGE) {
-			t->fds = malloc(batch_sz * sizeof(*t->fds));
-			if (!t->fds) {
-				fprintf(stderr, "cannot alloc t->fds\n");
-				exit(1);
-			}
-		} else {
+		if (storage_type == BPF_MAP_TYPE_TASK_STORAGE) {
 			t->pthds = malloc(batch_sz * sizeof(*t->pthds));
 			if (!t->pthds) {
 				fprintf(stderr, "cannot alloc t->pthds\n");
@@ -126,6 +141,12 @@ static void setup(void)
 			t->pthd_results = malloc(batch_sz * sizeof(*t->pthd_results));
 			if (!t->pthd_results) {
 				fprintf(stderr, "cannot alloc t->pthd_results\n");
+				exit(1);
+			}
+		} else {
+			t->fds = malloc(batch_sz * sizeof(*t->fds));
+			if (!t->fds) {
+				fprintf(stderr, "cannot alloc t->fds\n");
 				exit(1);
 			}
 		}
@@ -189,10 +210,10 @@ static void *task_producer(void *input)
 
 static void *producer(void *input)
 {
-	if (storage_type == BPF_MAP_TYPE_SK_STORAGE)
-		return sk_producer(input);
-	else
+	if (storage_type == BPF_MAP_TYPE_TASK_STORAGE)
 		return task_producer(input);
+	else
+		return sk_producer(input);
 }
 
 static void report_progress(int iter, struct bench_res *res, long delta_ns)
@@ -230,8 +251,8 @@ static void report_final(struct bench_res res[], int res_cnt)
 	       total_creates);
 	if (create_owner_errs || skel->bss->create_errs)
 		printf("%s() errors %ld create_errs %ld\n",
-		       storage_type == BPF_MAP_TYPE_SK_STORAGE ?
-		       "socket" : "pthread_create",
+		       storage_type == BPF_MAP_TYPE_TASK_STORAGE ?
+		       "pthread_create" : "socket",
 		       create_owner_errs,
 		       skel->bss->create_errs);
 }
