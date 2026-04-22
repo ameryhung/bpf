@@ -30,7 +30,7 @@ static const struct argp_option opts[] = {
 	{ "batch-size", ARG_BATCH_SZ, "BATCH_SIZE", 0,
 	  "The number of storage creations in each batch" },
 	{ "storage-type", ARG_STORAGE_TYPE, "STORAGE_TYPE", 0,
-	  "The type of local storage to test (socket, task, or hashmap)" },
+	  "The type of local storage to test (socket, task, hashmap, or rhashtab)" },
 	{},
 };
 
@@ -54,8 +54,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			storage_type = BPF_MAP_TYPE_SK_STORAGE;
 		} else if (!strcmp(arg, "hashmap")) {
 			storage_type = BPF_MAP_TYPE_HASH;
+		} else if (!strcmp(arg, "rhashtab")) {
+			storage_type = BPF_MAP_TYPE_RHASH;
 		} else {
-			fprintf(stderr, "invalid storage-type (socket, task, or hashmap)\n");
+			fprintf(stderr, "invalid storage-type (socket, task, hashmap, or rhashtab)\n");
 			argp_usage(state);
 		}
 		break;
@@ -90,7 +92,7 @@ static void setup(void)
 		exit(1);
 	}
 
-	if (storage_type != BPF_MAP_TYPE_HASH)
+	if (storage_type != BPF_MAP_TYPE_HASH && storage_type != BPF_MAP_TYPE_RHASH)
 		bpf_program__set_autoload(skel->progs.hashmap_socket_destroy, false);
 
 	if (bench_local_storage_create__load(skel)) {
@@ -100,8 +102,12 @@ static void setup(void)
 
 	skel->bss->bench_pid = getpid();
 
-	if (storage_type == BPF_MAP_TYPE_HASH) {
-		skel->bss->use_hashmap = 1;
+	if (storage_type == BPF_MAP_TYPE_HASH ||
+	    storage_type == BPF_MAP_TYPE_RHASH) {
+		if (storage_type == BPF_MAP_TYPE_HASH)
+			skel->bss->use_hashmap = 1;
+		else
+			skel->bss->use_rhashtab = 1;
 		if (!bpf_program__attach(skel->progs.socket_post_create)) {
 			fprintf(stderr, "Error attaching socket_post_create\n");
 			exit(1);
