@@ -281,6 +281,7 @@ extern struct argp bench_local_storage_rcu_tasks_trace_argp;
 extern struct argp bench_strncmp_argp;
 extern struct argp bench_hashmap_lookup_argp;
 extern struct argp bench_local_storage_create_argp;
+extern struct argp bench_local_storage_lookup_argp;
 extern struct argp bench_htab_mem_argp;
 extern struct argp bench_trigger_batch_argp;
 extern struct argp bench_crypto_argp;
@@ -297,6 +298,7 @@ static const struct argp_child bench_parsers[] = {
 		"local_storage RCU Tasks Trace slowdown benchmark", 0 },
 	{ &bench_hashmap_lookup_argp, 0, "Hashmap lookup benchmark", 0 },
 	{ &bench_local_storage_create_argp, 0, "local-storage-create benchmark", 0 },
+	{ &bench_local_storage_lookup_argp, 0, "local-storage-lookup benchmark", 0 },
 	{ &bench_htab_mem_argp, 0, "hash map memory benchmark", 0 },
 	{ &bench_trigger_batch_argp, 0, "BPF triggering benchmark", 0 },
 	{ &bench_crypto_argp, 0, "bpf crypto benchmark", 0 },
@@ -566,6 +568,7 @@ extern const struct bench bench_local_storage_tasks_trace;
 extern const struct bench bench_bpf_hashmap_lookup;
 extern const struct bench bench_bpf_rhashmap_lookup;
 extern const struct bench bench_local_storage_create;
+extern const struct bench bench_local_storage_lookup;
 extern const struct bench bench_htab_mem;
 extern const struct bench bench_rhtab_mem;
 extern const struct bench bench_crypto_encrypt;
@@ -647,6 +650,7 @@ static const struct bench *benchs[] = {
 	&bench_bpf_hashmap_lookup,
 	&bench_bpf_rhashmap_lookup,
 	&bench_local_storage_create,
+	&bench_local_storage_lookup,
 	&bench_htab_mem,
 	&bench_rhtab_mem,
 	&bench_crypto_encrypt,
