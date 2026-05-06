@@ -1451,6 +1451,7 @@ struct bpf_kfunc_call_arg_meta {
 		u8 spi;
 		u8 frameno;
 	} iter;
+	struct bpf_func_proto *fn;
 	struct bpf_map_desc map;
 	struct bpf_dynptr_desc dynptr;
 	struct ref_obj_desc ref_obj;
@@ -1535,7 +1536,8 @@ enum bpf_reg_arg_type {
 #define MAX_KFUNC_DESCS 256
 
 struct bpf_kfunc_desc {
-	struct btf_func_model func_model;
+	struct btf_func_model func_model; /* for JIT */
+	struct bpf_func_proto func_proto; /* for verifier */
 	u32 func_id;
 	s32 imm;
 	u16 offset;
