@@ -10876,7 +10876,7 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 		       struct bpf_kfunc_call_arg_meta *meta,
 		       const struct btf_type *t, const struct btf_type *ref_t,
 		       const char *ref_tname, const struct btf_param *args,
-		       int arg, int nargs, argno_t argno, struct bpf_reg_state *reg)
+		       int arg, int nargs, argno_t argno)
 {
 	bool arg_mem_size;
 
@@ -10940,16 +10940,6 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 
 	if (is_kfunc_arg_res_spin_lock(meta->btf, &args[arg]))
 		return KF_ARG_PTR_TO_RES_SPIN_LOCK;
-
-	if ((base_type(reg->type) == PTR_TO_BTF_ID || reg2btf_ids[base_type(reg->type)])) {
-		if (!btf_type_is_struct(ref_t)) {
-			verbose(env, "kernel function %s %s pointer type %s %s is not supported\n",
-				meta->func_name, reg_arg_name(env, argno),
-				btf_type_str(ref_t), ref_tname);
-			return -EINVAL;
-		}
-		return KF_ARG_PTR_TO_BTF_ID;
-	}
 
 	if (is_kfunc_arg_callback(env, meta->btf, &args[arg]))
 		return KF_ARG_PTR_TO_CALLBACK;
@@ -11657,9 +11647,19 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		ref_t = btf_type_skip_modifiers(btf, t->type, &ref_id);
 		ref_tname = btf_name_by_offset(btf, ref_t->name_off);
 
-		kf_arg_type = get_kfunc_ptr_arg_type(env, meta, t, ref_t, ref_tname, args, i, nargs, argno, reg);
-		if (kf_arg_type < 0)
-			return kf_arg_type;
+		if (base_type(reg->type) == PTR_TO_BTF_ID || reg2btf_ids[base_type(reg->type)]) {
+			if (!btf_type_is_struct(ref_t)) {
+				verbose(env, "kernel function %s %s pointer type %s %s is not supported\n",
+					meta->func_name, reg_arg_name(env, argno),
+					btf_type_str(ref_t), ref_tname);
+				return -EINVAL;
+			}
+			kf_arg_type = KF_ARG_PTR_TO_BTF_ID;
+		} else {
+			kf_arg_type = get_kfunc_ptr_arg_type(env, meta, t, ref_t, ref_tname, args, i, nargs, argno);
+			if (kf_arg_type < 0)
+				return kf_arg_type;
+		}
 
 		/* If the arg is nullable and the register is null, skip
 		 * further verification for this arg. For MEM_SIZE args,
