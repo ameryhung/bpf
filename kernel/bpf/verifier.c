@@ -10331,18 +10331,6 @@ static bool is_kfunc_rcu_protected(struct bpf_kfunc_call_arg_meta *meta)
 	return meta->kfunc_flags & KF_RCU_PROTECTED;
 }
 
-static bool is_kfunc_arg_mem_size(const struct btf *btf,
-				  const struct btf_param *arg,
-				  const struct bpf_reg_state *reg)
-{
-	const struct btf_type *t;
-
-	t = btf_type_skip_modifiers(btf, arg->type, NULL);
-	if (!btf_type_is_scalar(t) || reg->type != SCALAR_VALUE)
-		return false;
-
-	return btf_param_match_suffix(btf, arg, "__sz");
-}
 
 static bool is_kfunc_arg_const_mem_size(const struct btf *btf,
 					const struct btf_param *arg,
@@ -10390,6 +10378,30 @@ static bool is_kfunc_arg_refcounted_kptr(const struct btf *btf, const struct btf
 static bool is_kfunc_arg_nullable(const struct btf *btf, const struct btf_param *arg)
 {
 	return btf_param_match_suffix(btf, arg, "__nullable");
+}
+
+static bool is_kfunc_arg_mem_size_btf(const struct btf *btf,
+				      const struct btf_param *arg)
+{
+	const struct btf_type *t;
+
+	t = btf_type_skip_modifiers(btf, arg->type, NULL);
+	if (!btf_type_is_scalar(t))
+		return false;
+
+	return btf_param_match_suffix(btf, arg, "__sz");
+}
+
+static bool is_kfunc_arg_const_mem_size_btf(const struct btf *btf,
+					    const struct btf_param *arg)
+{
+	const struct btf_type *t;
+
+	t = btf_type_skip_modifiers(btf, arg->type, NULL);
+	if (!btf_type_is_scalar(t))
+		return false;
+
+	return btf_param_match_suffix(btf, arg, "__szk");
 }
 
 static bool is_kfunc_arg_const_str(const struct btf *btf, const struct btf_param *arg)
@@ -10611,7 +10623,6 @@ enum kfunc_ptr_arg_type {
 	KF_ARG_PTR_TO_CALLBACK,
 	KF_ARG_PTR_TO_RB_ROOT,
 	KF_ARG_PTR_TO_RB_NODE,
-	KF_ARG_PTR_TO_NULL,
 	KF_ARG_PTR_TO_CONST_STR,
 	KF_ARG_PTR_TO_MAP,
 	KF_ARG_PTR_TO_TIMER,
@@ -10867,19 +10878,12 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 		       const char *ref_tname, const struct btf_param *args,
 		       int arg, int nargs, argno_t argno, struct bpf_reg_state *reg)
 {
-	u32 regno = arg + 1;
-	struct bpf_reg_state *regs = cur_regs(env);
-	bool arg_mem_size = false;
+	bool arg_mem_size;
 
 	if (meta->func_id == special_kfunc_list[KF_bpf_cast_to_kern_ctx] ||
 	    meta->func_id == special_kfunc_list[KF_bpf_session_is_return] ||
 	    meta->func_id == special_kfunc_list[KF_bpf_session_cookie])
 		return KF_ARG_PTR_TO_CTX;
-
-	if (arg + 1 < nargs &&
-	    (is_kfunc_arg_mem_size(meta->btf, &args[arg + 1], &regs[regno + 1]) ||
-	     is_kfunc_arg_const_mem_size(meta->btf, &args[arg + 1], &regs[regno + 1])))
-		arg_mem_size = true;
 
 	/* In this function, we verify the kfunc's BTF as per the argument type,
 	 * leaving the rest of the verification with respect to the register
@@ -10888,10 +10892,6 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 	 */
 	if (btf_is_prog_ctx_type(&env->log, meta->btf, t, resolve_prog_type(env->prog), arg))
 		return KF_ARG_PTR_TO_CTX;
-
-	if (is_kfunc_arg_nullable(meta->btf, &args[arg]) && bpf_register_is_null(reg) &&
-	    !arg_mem_size)
-		return KF_ARG_PTR_TO_NULL;
 
 	if (is_kfunc_arg_prog_aux(meta->btf, &args[arg]))
 		return KF_ARG_PTR_TO_PROG_AUX;
@@ -10959,6 +10959,10 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 	 * pointer to scalar, or struct composed (recursively) of scalars. When
 	 * arg_mem_size is true, the pointer can be void *.
 	 */
+	arg_mem_size = (arg + 1 < nargs &&
+		(is_kfunc_arg_mem_size_btf(meta->btf, &args[arg + 1]) ||
+		 is_kfunc_arg_const_mem_size_btf(meta->btf, &args[arg + 1])));
+
 	if (!btf_type_is_scalar(ref_t) && !__btf_type_is_scalar_struct(env, meta->btf, ref_t, 0) &&
 	    (arg_mem_size ? !btf_type_is_void(ref_t) : 1)) {
 		verbose(env, "%s pointer type %s %s must point to %sscalar, or struct with scalar\n",
@@ -11657,9 +11661,17 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (kf_arg_type < 0)
 			return kf_arg_type;
 
-		switch (kf_arg_type) {
-		case KF_ARG_PTR_TO_NULL:
+		/* If the arg is nullable and the register is null, skip
+		 * further verification for this arg. For MEM_SIZE args,
+		 * we still need to process the paired size arg (e.g.
+		 * record __szk constant) and advance i to skip it.
+		 */
+		if (is_kfunc_arg_nullable(meta->btf, &args[i]) &&
+		    bpf_register_is_null(reg) &&
+		    kf_arg_type != KF_ARG_PTR_TO_MEM_SIZE)
 			continue;
+
+		switch (kf_arg_type) {
 		case KF_ARG_PTR_TO_MAP:
 			if (!reg->map_ptr) {
 				verbose(env, "pointer in %s isn't map pointer\n",
