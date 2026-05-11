@@ -1901,7 +1901,7 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 			goto next_insn;
 		}
 
-		if (insn->imm == BPF_FUNC_timer_set_callback) {
+		if (env->insn_aux_data[i + delta].arg_prog) {
 			/* The verifier will process callback_fn as many times as necessary
 			 * with different maps and the register states prepared by
 			 * set_timer_callback_state will be accurate.
@@ -1915,9 +1915,8 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 			 *     Those that were not both bpf_timer_init-ed and
 			 *     bpf_timer_set_callback-ed will return -EINVAL.
 			 */
-			struct bpf_insn ld_addrs[2] = {
-				BPF_LD_IMM64(BPF_REG_3, (long)prog->aux),
-			};
+			u32 regno = env->insn_aux_data[i + delta].arg_prog;
+			struct bpf_insn ld_addrs[2] = { BPF_LD_IMM64(regno, (long)env->prog->aux) };
 
 			insn_buf[0] = ld_addrs[0];
 			insn_buf[1] = ld_addrs[1];

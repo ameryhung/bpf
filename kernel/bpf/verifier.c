@@ -7946,6 +7946,11 @@ static int get_constant_map_key(struct bpf_verifier_env *env,
 	return 0;
 }
 
+static struct bpf_insn_aux_data *cur_aux(const struct bpf_verifier_env *env)
+{
+	return &env->insn_aux_data[env->insn_idx];
+}
+
 static bool can_elide_value_nullness(enum bpf_map_type type);
 
 static int check_func_arg(struct bpf_verifier_env *env, u32 arg,
@@ -8184,6 +8189,13 @@ skip_type_check:
 		err = process_kptr_func(env, regno, meta);
 		if (err)
 			return err;
+		break;
+	case ARG_PTR_TO_PROG_AUX:
+		if (cur_aux(env)->arg_prog) {
+			verifier_bug(env, "Only 1 prog->aux argument supported per-helper");
+			return -EFAULT;
+		}
+		cur_aux(env)->arg_prog = regno;
 		break;
 	}
 
@@ -9732,11 +9744,6 @@ static int check_get_func_ip(struct bpf_verifier_env *env)
 	return -ENOTSUPP;
 }
 
-static struct bpf_insn_aux_data *cur_aux(const struct bpf_verifier_env *env)
-{
-	return &env->insn_aux_data[env->insn_idx];
-}
-
 static bool loop_flag_is_zero(struct bpf_verifier_env *env)
 {
 	struct bpf_reg_state *reg = reg_state(env, BPF_REG_4);
@@ -10612,6 +10619,7 @@ enum kfunc_ptr_arg_type {
 	KF_ARG_PTR_TO_IRQ_FLAG,
 	KF_ARG_PTR_TO_RES_SPIN_LOCK,
 	KF_ARG_PTR_TO_TASK_WORK,
+	KF_ARG_PTR_TO_PROG_AUX,
 };
 
 enum special_kfunc_type {
@@ -10884,6 +10892,9 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 	if (is_kfunc_arg_nullable(meta->btf, &args[arg]) && bpf_register_is_null(reg) &&
 	    !arg_mem_size)
 		return KF_ARG_PTR_TO_NULL;
+
+	if (is_kfunc_arg_prog_aux(meta->btf, &args[arg]))
+		return KF_ARG_PTR_TO_PROG_AUX;
 
 	if (is_kfunc_arg_alloc_obj(meta->btf, &args[arg]))
 		return KF_ARG_PTR_TO_ALLOC_BTF_ID;
@@ -11563,17 +11574,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		bool is_ret_buf_sz = false;
 		int kf_arg_type;
 
-		if (is_kfunc_arg_prog_aux(btf, &args[i])) {
-			/* Reject repeated use bpf_prog_aux */
-			if (meta->arg_prog) {
-				verifier_bug(env, "Only 1 prog->aux argument supported per-kfunc");
-				return -EFAULT;
-			}
-			meta->arg_prog = true;
-			cur_aux(env)->arg_prog = regno;
-			continue;
-		}
-
 		if (is_kfunc_arg_ignore(btf, &args[i]) || is_kfunc_arg_implicit(meta, i))
 			continue;
 
@@ -12078,6 +12078,13 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				return ret;
 			break;
 		}
+		case KF_ARG_PTR_TO_PROG_AUX:
+			if (cur_aux(env)->arg_prog) {
+				verifier_bug(env, "Only 1 prog->aux argument supported per-kfunc");
+				return -EFAULT;
+			}
+			cur_aux(env)->arg_prog = regno;
+			break;
 		}
 	}
 
@@ -19120,16 +19127,6 @@ int bpf_fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		*cnt = 6;
 	}
 
-	if (env->insn_aux_data[insn_idx].arg_prog) {
-		u32 regno = env->insn_aux_data[insn_idx].arg_prog;
-		struct bpf_insn ld_addrs[2] = { BPF_LD_IMM64(regno, (long)env->prog->aux) };
-		int idx = *cnt;
-
-		insn_buf[idx++] = ld_addrs[0];
-		insn_buf[idx++] = ld_addrs[1];
-		insn_buf[idx++] = *insn;
-		*cnt = idx;
-	}
 	return 0;
 }
 

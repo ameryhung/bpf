@@ -864,6 +864,7 @@ enum bpf_arg_type {
 	ARG_PTR_TO_TIMER,	/* pointer to bpf_timer */
 	ARG_KPTR_XCHG_DEST,	/* pointer to destination that kptrs are bpf_kptr_xchg'd into */
 	ARG_PTR_TO_DYNPTR,      /* pointer to bpf_dynptr. See bpf_type_flag for dynptr type */
+	ARG_PTR_TO_PROG_AUX,    /* pointer to bpf_prog_aux fixed up by the verifier */
 	__BPF_ARG_TYPE_MAX,
 
 	/* Extended arg_types. */
