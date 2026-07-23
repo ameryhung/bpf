@@ -185,6 +185,19 @@ int arg_tag_nonnull_ptr_good(void *ctx)
 	return subprog_nonnull_ptr_good(&x, &y);
 }
 
+/* a hardcoded NULL is a SCALAR_VALUE, not a PTR_MAYBE_NULL, so make sure it
+ * still gets rejected for an __arg_nonnull argument
+ */
+SEC("?raw_tp")
+__failure __log_level(2)
+__msg("R1 is expected to be non-NULL")
+int arg_tag_nonnull_ptr_null_bad(void *ctx)
+{
+	int y = 74;
+
+	return subprog_nonnull_ptr_good(NULL, &y);
+}
+
 /* this global subprog can be now called from many types of entry progs, each
  * with different context type
  */
