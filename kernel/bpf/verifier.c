@@ -12450,8 +12450,8 @@ check_ok:
 				return ret;
 			break;
 		case KF_ARG_CONST_MAP_PTR:
-			if (!reg->map_ptr) {
-				verbose(env, "pointer in %s isn't map pointer\n",
+			if (base_type(reg->type) != CONST_PTR_TO_MAP) {
+				verbose(env, "%s is not a map pointer\n",
 					reg_arg_name(env, argno));
 				return -EINVAL;
 			}
