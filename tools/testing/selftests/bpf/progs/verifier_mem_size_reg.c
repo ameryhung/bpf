@@ -25,7 +25,7 @@ struct {
 
 /* An un-narrowed map-of-maps value must be rejected as a __nullable kfunc mem buffer */
 SEC("?tc")
-__failure
+__failure __msg("type=map_ptr expected=fp")
 int mapofmaps_value_as_kfunc_mem_buf(struct __sk_buff *skb)
 {
 	struct bpf_dynptr dptr;
@@ -38,7 +38,7 @@ int mapofmaps_value_as_kfunc_mem_buf(struct __sk_buff *skb)
 
 	bpf_dynptr_from_skb(skb, 0, &dptr);
 	/* pass the un-narrowed map-of-maps value as the scratch buffer */
-	p = bpf_dynptr_slice(&dptr, 0, inner, 8);
+	p = bpf_dynptr_slice(&dptr, 0, inner, 4);
 	if (p)
 		return p[0];
 	return 0;
@@ -46,7 +46,7 @@ int mapofmaps_value_as_kfunc_mem_buf(struct __sk_buff *skb)
 
 /* An un-narrowed map-of-maps value must be rejected as a PTR_MAYBE_NULL helper mem buffer */
 SEC("?tc")
-__failure
+__failure __msg("type=map_ptr expected=fp")
 int mapofmaps_value_as_helper_mem_buf(struct __sk_buff *skb)
 {
 	__u32 key = 0;
