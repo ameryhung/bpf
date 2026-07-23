@@ -8357,8 +8357,6 @@ static bool can_elide_value_nullness(const struct bpf_map *map);
 static int process_map_ptr_arg(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
 			       argno_t argno, struct bpf_call_arg_meta *meta)
 {
-	int map_regno = reg_from_argno(argno);
-
 	/* Use map_uid (which is unique id of inner map) to reject:
 	 * inner_map1 = bpf_map_lookup_elem(outer_map, key1)
 	 * inner_map2 = bpf_map_lookup_elem(outer_map, key2)
@@ -8373,6 +8371,7 @@ static int process_map_ptr_arg(struct bpf_verifier_env *env, struct bpf_reg_stat
 	 */
 	if (meta->map.ptr &&
 	    (meta->map.ptr != reg->map_ptr || meta->map.uid != reg->map_uid)) {
+		argno_t obj_argno = argno_from_arg(arg_from_argno(argno) - 1);
 		struct btf_record *rec = meta->map.ptr->record;
 		const char *obj_name = "workqueue";
 
@@ -8381,8 +8380,10 @@ static int process_map_ptr_arg(struct bpf_verifier_env *env, struct bpf_reg_stat
 		else if (rec->task_work_off >= 0)
 			obj_name = "bpf_task_work";
 
-		verbose(env, "%s pointer in R%d map_uid=%d doesn't match map pointer in R%d map_uid=%d\n",
-			obj_name, map_regno - 1, meta->map.uid, map_regno, reg->map_uid);
+		verbose(env, "%s pointer in %s map_uid=%d ",
+			obj_name, reg_arg_name(env, obj_argno), meta->map.uid);
+		verbose(env, "doesn't match map pointer in %s map_uid=%d\n",
+			reg_arg_name(env, argno), reg->map_uid);
 		return -EINVAL;
 	}
 
